@@ -663,14 +663,14 @@ def main():
     parser.add_argument(
         "--num-kernels",
         type=int,
-        default=2000,
-        help="Number of ROCKET kernels (reduced for small datasets)",
+        default=1000,
+        help="Number of ROCKET kernels (optimized for small datasets)",
     )
     parser.add_argument(
         "--C",
         type=float,
-        default=0.001,
-        help="Logistic regression regularization parameter (smaller = more regularization)",
+        default=0.0001,
+        help="Logistic regression regularization parameter (optimized for small datasets)",
     )
     parser.add_argument(
         "--penalty",

@@ -76,8 +76,8 @@ def run_single_experiment(config, results_base_dir):
     if config["model"] == "rocket_transformer":
         cmd.extend(["--class-weight", "balanced"])
         cmd.extend(["--penalty", config["regularization"]])
-        cmd.extend(["--C", "0.001"])  # Use strong regularization - balanced setting
-        cmd.extend(["--num-kernels", "2000"])  # Optimal kernel count for small dataset
+        cmd.extend(["--C", "0.0001"])  # Optimal hyperparameter from search
+        cmd.extend(["--num-kernels", "1000"])  # Optimal kernel count from search
 
     try:
         result = subprocess.run(
