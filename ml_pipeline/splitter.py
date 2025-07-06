@@ -63,6 +63,10 @@ def create_patient_level_holdout(
     train_df = metadata_df[metadata_df["mrn"].isin(train_mrns)].copy()
     holdout_df = metadata_df[metadata_df["mrn"].isin(holdout_mrns)].copy()
 
+    # Reset indices to maintain 0-based indexing for proper waveform alignment
+    train_df = train_df.reset_index(drop=True)
+    holdout_df = holdout_df.reset_index(drop=True)
+
     logger.info(f"Patient-level holdout split:")
     logger.info(f"  Train: {len(train_df)} ECGs from {len(train_mrns)} patients")
     logger.info(f"  Holdout: {len(holdout_df)} ECGs from {len(holdout_mrns)} patients")
@@ -120,6 +124,10 @@ def create_patient_level_cv_folds(
         train_df = metadata_df[metadata_df["mrn"].isin(train_mrns)].copy()
         val_df = metadata_df[metadata_df["mrn"].isin(val_mrns)].copy()
 
+        # Reset indices to maintain 0-based indexing for proper waveform alignment
+        train_df = train_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
+
         folds.append((train_df, val_df))
 
         logger.info(
@@ -165,6 +173,10 @@ def split_train_val(
     # Split ECGs based on patient assignment
     train_df = metadata_df[metadata_df["mrn"].isin(train_mrns)].copy()
     val_df = metadata_df[metadata_df["mrn"].isin(val_mrns)].copy()
+
+    # Reset indices to maintain 0-based indexing for proper waveform alignment
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
 
     logger.info(f"Train/Val split:")
     logger.info(f"  Train: {len(train_df)} ECGs from {len(train_mrns)} patients")
