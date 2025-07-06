@@ -73,15 +73,17 @@ Use `RandomizedSearchCV(n_iter=8)` to finish in minutes.
    3. ✅ Allow `--sample-weight` to toggle passing weights instead of oversampling.
 
 ### 🚨 **URGENT FIXES NEEDED:**
-3. **Fix Overfitting Issues** 🔄
-   1. **Increase regularization**: Default C=0.1 instead of C=1.0
-   2. **Reduce ROCKET kernels**: Use 2000-5000 instead of 10000 for small dataset
-   3. **Add early stopping**: Monitor validation performance
-   4. **Cross-validation improvements**: Use stratified group k-fold with k=3 (larger folds)
-4. **Improve Data Strategy** 🔄
-   1. **Focus on all leads only**: Single lead shows no signal
-   2. **Patient-level bootstrapping**: Duplicate minority patients to increase effective sample size
-   3. **Feature selection**: Add L1 regularization option
+3. **Fix Overfitting Issues** ⚠️ **PARTIALLY COMPLETED - STILL OVERFITTING**
+   1. ✅ **Increase regularization**: C=0.01 implemented
+   2. ✅ **Reduce ROCKET kernels**: 3000 kernels implemented  
+   3. ❌ **Still severe overfitting**: Train AUC=1.0, Val AUC=0.486
+   4. ❌ **Cross-validation improvements**: 5-fold still too small for 820 samples
+4. **EMERGENCY INTERVENTIONS NEEDED** 🔥
+   1. **Extreme regularization**: Try C=0.001 or even 0.0001
+   2. **Massive kernel reduction**: Try 1000-2000 kernels
+   3. **Early stopping**: Implement validation-based stopping
+   4. **Patient-level bootstrapping**: Increase effective sample size
+   5. **Feature selection**: Use L1 penalty for automatic feature selection
 
 ### ⏳ **REMAINING STEPS:**
 5. **Implement Hyper-Parameter Search** (only when `--tune` flag passed):
