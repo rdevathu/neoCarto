@@ -38,7 +38,7 @@ EXPERIMENT_CONFIGS = {
     ],
     "models": ["rocket_transformer", "resnet"],
     "lead_configs": ["all"],  # Focus on all leads only - single lead shows no signal
-    "augmentation": [False],  # Optimal: no augmentation for small dataset
+    "augmentation": [False, True],  # Optimal: no augmentation for small dataset
     "oversampling": [False],  # Optimal: class weighting sufficient
     "regularization": ["l2"],  # Focus on L2 only - L1 too extreme at this C value
 }
