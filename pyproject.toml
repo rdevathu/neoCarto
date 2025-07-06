@@ -1,0 +1,25 @@
+[project]
+name = "neocarto"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.2.1",
+    "imbalanced-learn>=0.13.0",
+    "ipykernel>=6.29.5",
+    "joblib>=1.5.1",
+    "matplotlib>=3.10.3",
+    "neurokit2>=0.2.11",
+    "numba>=0.61.2",
+    "numpy>=2.2.6",
+    "openpyxl>=3.1.5",
+    "pandas>=2.3.0",
+    "pywavelets>=1.8.0",
+    "rich>=14.0.0",
+    "scikit-learn>=1.6.1",
+    "seaborn>=0.13.2",
+    "sierraecg>=0.4.0",
+    "sktime>=0.38.3",
+    "tqdm>=4.67.1",
+]
