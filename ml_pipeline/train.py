@@ -85,7 +85,7 @@ def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs
         try:
             from sktime.classification.kernel_based import RocketClassifier
 
-            return RocketClassifier(random_state=random_state)
+            return RocketClassifier(random_state=random_state, n_jobs=-1)
         except ImportError:
             console.print(
                 "[red]Error: sktime not installed or RocketClassifier not available[/red]"
