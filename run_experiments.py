@@ -36,7 +36,7 @@ EXPERIMENT_CONFIGS = {
         "af_at_recurrence_5y",
         "af_at_recurrence_any",
     ],
-    "models": ["rocket", "resnet"],
+    "models": ["rocket_transformer", "resnet"],
     "lead_configs": ["lead1", "all"],
     "augmentation": [True, False],
     "oversampling": [True, False],
@@ -70,6 +70,10 @@ def run_single_experiment(config, results_base_dir):
 
     if config["oversampling"]:
         cmd.append("--oversample")
+
+    # Add class weight for rocket_transformer
+    if config["model"] == "rocket_transformer":
+        cmd.extend(["--class-weight", "balanced"])
 
     try:
         result = subprocess.run(
@@ -128,7 +132,7 @@ def filter_configs(configs, quick_run=False):
             if (
                 config["pre_ecg_window"] == "pre_ecg_1y"
                 and config["outcome_label"] in ["af_recurrence_1y", "at_recurrence_1y"]
-                and config["model"] == "rocket"
+                and config["model"] == "rocket_transformer"
             ):
                 filtered.append(config)
         return filtered[:8]  # Just first 8 for quick test

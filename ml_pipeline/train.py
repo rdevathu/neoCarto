@@ -68,7 +68,7 @@ def create_results_dir(base_dir: str = "results") -> Path:
     return results_dir
 
 
-def get_model(model_name: str, n_features: int, random_state: int = 42):
+def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs):
     """
     Get model instance based on name.
 
@@ -76,6 +76,7 @@ def get_model(model_name: str, n_features: int, random_state: int = 42):
         model_name: Name of the model ('rocket' or 'resnet')
         n_features: Number of features (for ResNet)
         random_state: Random seed
+        **kwargs: Additional model parameters
 
     Returns:
         Model instance
@@ -88,6 +89,37 @@ def get_model(model_name: str, n_features: int, random_state: int = 42):
         except ImportError:
             console.print(
                 "[red]Error: sktime not installed or RocketClassifier not available[/red]"
+            )
+            raise
+
+    elif model_name == "rocket_transformer":
+        try:
+            from sktime.transformations.panel.rocket import Rocket
+            from sklearn.linear_model import LogisticRegression
+
+            # Extract parameters
+            num_kernels = kwargs.get("num_kernels", 10000)
+            C = kwargs.get("C", 1.0)
+            class_weight = kwargs.get("class_weight", None)
+            max_iter = kwargs.get("max_iter", 1000)
+
+            # Create ROCKET transformer
+            rocket_transformer = Rocket(
+                num_kernels=num_kernels, random_state=random_state
+            )
+
+            # Create logistic regression classifier
+            classifier = LogisticRegression(
+                C=C,
+                class_weight=class_weight,
+                max_iter=max_iter,
+                random_state=random_state,
+            )
+
+            return rocket_transformer, classifier
+        except ImportError:
+            console.print(
+                "[red]Error: sktime not installed or Rocket transformer not available[/red]"
             )
             raise
 
@@ -113,7 +145,10 @@ def create_pipeline(
     model_name: str,
     n_features: int,
     use_oversampling: bool = True,
+    use_sample_weights: bool = False,
+    class_weight: str = None,
     random_state: int = 42,
+    **model_kwargs,
 ) -> Pipeline:
     """
     Create ML pipeline with preprocessing and model.
@@ -122,34 +157,64 @@ def create_pipeline(
         model_name: Name of the model
         n_features: Number of features
         use_oversampling: Whether to use oversampling for class imbalance
+        use_sample_weights: Whether to use sample weights instead of oversampling
+        class_weight: Class weight strategy for models that support it
         random_state: Random seed
+        **model_kwargs: Additional model parameters
 
     Returns:
         Sklearn pipeline
     """
-    model = get_model(model_name, n_features, random_state)
+    # Handle class weighting for supported models
+    if class_weight and model_name == "rocket_transformer":
+        model_kwargs["class_weight"] = class_weight
 
-    # Time series classifiers (ROCKET, ResNet) work with 3D data and cannot use
-    # traditional oversampling which expects 2D data. We skip oversampling for these.
-    if model_name in ["rocket", "resnet"] and use_oversampling:
-        logger.warning(
-            f"Oversampling not supported with {model_name} (3D time series data) - skipping oversampling"
-        )
-        use_oversampling = False
+    # Get model components
+    model_components = get_model(model_name, n_features, random_state, **model_kwargs)
 
-    steps = []
+    # Handle different model types
+    if model_name == "rocket_transformer":
+        # ROCKET transformer + classifier pipeline
+        transformer, classifier = model_components
 
-    # Add oversampling if requested and supported
-    if use_oversampling:
-        steps.append(("oversampler", RandomOverSampler(random_state=random_state)))
+        steps = [("rocket_transformer", transformer)]
 
-    # Add model
-    steps.append(("classifier", model))
+        # Add oversampling after transformation (now 2D)
+        if use_oversampling and not use_sample_weights:
+            steps.append(("oversampler", RandomOverSampler(random_state=random_state)))
 
-    if use_oversampling:
-        return ImbPipeline(steps)
+        steps.append(("classifier", classifier))
+
+        if use_oversampling and not use_sample_weights:
+            return ImbPipeline(steps)
+        else:
+            return Pipeline(steps)
+
     else:
-        return Pipeline(steps)
+        # Traditional approach for other models
+        model = model_components
+
+        # Time series classifiers (ROCKET, ResNet) work with 3D data and cannot use
+        # traditional oversampling which expects 2D data. We skip oversampling for these.
+        if model_name in ["rocket", "resnet"] and use_oversampling:
+            logger.warning(
+                f"Oversampling not supported with {model_name} (3D time series data) - skipping oversampling"
+            )
+            use_oversampling = False
+
+        steps = []
+
+        # Add oversampling if requested and supported
+        if use_oversampling:
+            steps.append(("oversampler", RandomOverSampler(random_state=random_state)))
+
+        # Add model
+        steps.append(("classifier", model))
+
+        if use_oversampling:
+            return ImbPipeline(steps)
+        else:
+            return Pipeline(steps)
 
 
 def evaluate_model(
@@ -190,7 +255,10 @@ def train_single_fold(
     lead_config: str,
     use_augmentation: bool,
     use_oversampling: bool,
+    use_sample_weights: bool,
+    class_weight: str,
     random_state: int,
+    **model_kwargs,
 ) -> Tuple[Pipeline, Dict[str, float], Dict[str, float]]:
     """
     Train a single fold.
@@ -205,7 +273,10 @@ def train_single_fold(
         lead_config: Lead configuration
         use_augmentation: Whether to use augmentation
         use_oversampling: Whether to use oversampling
+        use_sample_weights: Whether to use sample weights
+        class_weight: Class weight strategy
         random_state: Random seed
+        **model_kwargs: Additional model parameters
 
     Returns:
         Tuple of (trained_pipeline, train_metrics, val_metrics)
@@ -231,11 +302,49 @@ def train_single_fold(
 
     # Create pipeline
     n_features = train_X.shape[-1]  # Number of leads
-    pipeline = create_pipeline(model_name, n_features, use_oversampling, random_state)
+    pipeline = create_pipeline(
+        model_name,
+        n_features,
+        use_oversampling,
+        use_sample_weights,
+        class_weight,
+        random_state,
+        **model_kwargs,
+    )
 
     # Train model
     logger.info(f"Training {model_name} with {len(train_X)} samples")
-    pipeline.fit(train_X, train_y)
+
+    # Handle sample weights if requested
+    if (
+        use_sample_weights
+        and not use_oversampling
+        and model_name == "rocket_transformer"
+    ):
+        # Import here to avoid circular imports
+        import sys
+        from pathlib import Path
+
+        utils_path = Path(__file__).parent.parent / "utils"
+        if str(utils_path) not in sys.path:
+            sys.path.append(str(utils_path))
+
+        try:
+            from cv_helpers import calculate_sample_weights
+
+            sample_weights = calculate_sample_weights(
+                train_y, method=class_weight or "balanced"
+            )
+
+            # For rocket_transformer, pass sample weights to the final classifier
+            pipeline.fit(train_X, train_y, classifier__sample_weight=sample_weights)
+        except ImportError as e:
+            logger.warning(
+                f"Could not import cv_helpers: {e}, falling back to regular fit"
+            )
+            pipeline.fit(train_X, train_y)
+    else:
+        pipeline.fit(train_X, train_y)
 
     # Evaluate on training set
     train_pred = pipeline.predict(train_X)
@@ -259,10 +368,13 @@ def run_experiment(
     lead_config: str,
     use_augmentation: bool,
     use_oversampling: bool,
+    use_sample_weights: bool,
+    class_weight: str,
     use_cv: bool,
     n_folds: int,
     random_state: int,
     results_dir: Path,
+    **model_kwargs,
 ) -> Dict[str, Any]:
     """
     Run a complete experiment.
@@ -276,10 +388,13 @@ def run_experiment(
         lead_config: Lead configuration
         use_augmentation: Whether to use augmentation
         use_oversampling: Whether to use oversampling
+        use_sample_weights: Whether to use sample weights
+        class_weight: Class weight strategy
         use_cv: Whether to use cross-validation
         n_folds: Number of CV folds
         random_state: Random seed
         results_dir: Results directory
+        **model_kwargs: Additional model parameters
 
     Returns:
         Dictionary with experiment results
@@ -309,9 +424,12 @@ def run_experiment(
             "lead_config": lead_config,
             "use_augmentation": use_augmentation,
             "use_oversampling": use_oversampling,
+            "use_sample_weights": use_sample_weights,
+            "class_weight": class_weight,
             "use_cv": use_cv,
             "n_folds": n_folds,
             "random_state": random_state,
+            "model_kwargs": model_kwargs,
         },
         "cohort_size": len(cohort_df),
         "n_patients": cohort_df["mrn"].nunique(),
@@ -337,7 +455,10 @@ def run_experiment(
                 lead_config,
                 use_augmentation,
                 use_oversampling,
+                use_sample_weights,
+                class_weight,
                 random_state,
+                **model_kwargs,
             )
 
             cv_results.append(
@@ -378,7 +499,10 @@ def run_experiment(
             lead_config,
             use_augmentation,
             use_oversampling,
+            use_sample_weights,
+            class_weight,
             random_state,
+            **model_kwargs,
         )
 
         results["train_metrics"] = train_metrics
@@ -480,7 +604,10 @@ def main():
         "--outcome-label", default="af_recurrence_1y", help="Outcome label column name"
     )
     parser.add_argument(
-        "--model", choices=["rocket", "resnet"], default="rocket", help="Model to use"
+        "--model",
+        choices=["rocket", "rocket_transformer", "resnet"],
+        default="rocket_transformer",
+        help="Model to use",
     )
     parser.add_argument(
         "--leads", choices=["lead1", "all"], default="all", help="Lead configuration"
@@ -492,6 +619,27 @@ def main():
     )
     parser.add_argument(
         "--oversample", action="store_true", help="Use oversampling for class imbalance"
+    )
+    parser.add_argument(
+        "--use-sample-weights",
+        action="store_true",
+        help="Use sample weights instead of oversampling",
+    )
+    parser.add_argument(
+        "--class-weight",
+        default=None,
+        help="Class weight strategy (balanced, inverse, or ratio like 1:3)",
+    )
+
+    # Model-specific arguments
+    parser.add_argument(
+        "--num-kernels", type=int, default=10000, help="Number of ROCKET kernels"
+    )
+    parser.add_argument(
+        "--C",
+        type=float,
+        default=1.0,
+        help="Logistic regression regularization parameter",
     )
     parser.add_argument("--cv", action="store_true", help="Use cross-validation")
     parser.add_argument("--n-folds", type=int, default=5, help="Number of CV folds")
@@ -532,6 +680,12 @@ def main():
 
         # Run experiment
         console.print("[bold]Running experiment...[/bold]")
+        # Prepare model kwargs
+        model_kwargs = {
+            "num_kernels": args.num_kernels,
+            "C": args.C,
+        }
+
         results = run_experiment(
             processed_df,
             waveforms,
@@ -541,10 +695,13 @@ def main():
             args.leads,
             args.augment,
             args.oversample,
+            args.use_sample_weights,
+            args.class_weight,
             args.cv,
             args.n_folds,
             args.random_state,
             results_dir,
+            **model_kwargs,
         )
 
         if "error" in results:
