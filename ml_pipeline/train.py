@@ -105,7 +105,9 @@ def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs
 
             # Create ROCKET transformer
             rocket_transformer = Rocket(
-                num_kernels=num_kernels, random_state=random_state
+                num_kernels=num_kernels,
+                random_state=random_state,
+                n_jobs=-1,
             )
 
             # Create logistic regression classifier
@@ -114,6 +116,7 @@ def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs
                 class_weight=class_weight,
                 max_iter=max_iter,
                 random_state=random_state,
+                n_jobs=-1,
             )
 
             return rocket_transformer, classifier
