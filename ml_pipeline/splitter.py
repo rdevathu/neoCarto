@@ -452,11 +452,11 @@ class PatientBootstrapper:
                 # Create new metadata with modified indices
                 duplicated_metadata = patient_ecgs.copy()
 
-                # Add suffix to distinguish duplicated entries (for debugging)
-                duplicated_metadata["mrn"] = (
-                    duplicated_metadata["mrn"].astype(str)
-                    + f"_dup_{duplication_idx + 1}"
-                )
+                # Preserve MRN so the splitter will still treat all duplicates as the same patient
+                # (prevents any chance of patient-level leakage). Instead, add a helper column
+                # that indicates this is a bootstrapped duplicate. This column is NOT used by any
+                # downstream logic and therefore does not interfere with splitting or evaluation.
+                duplicated_metadata["dup_idx"] = duplication_idx + 1
 
                 # Reset index to avoid conflicts
                 duplicated_metadata = duplicated_metadata.reset_index(drop=True)

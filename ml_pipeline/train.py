@@ -459,32 +459,21 @@ def run_experiment(
         logger.warning(f"No data for {pre_ecg_window} -> {outcome_label}")
         return {"error": "No data available"}
 
-    # Apply patient bootstrapping if requested
-    if bootstrap_patients:
-        from splitter import PatientBootstrapper
-
-        logger.info("Applying patient-level bootstrapping...")
-
-        bootstrapper = PatientBootstrapper(random_state=random_state)
-        cohort_df, cohort_waveforms = bootstrapper.bootstrap_minority_patients(
-            cohort_df, cohort_waveforms, outcome_label
-        )
-
-        # Validate bootstrap integrity
-        original_cohort_df, _ = get_cohort_for_window_and_outcome(
-            metadata_df, waveforms, pre_ecg_window, outcome_label
-        )
-        if not bootstrapper.validate_bootstrap_integrity(
-            original_cohort_df, cohort_df, outcome_label
-        ):
-            logger.error("Bootstrap integrity validation failed")
-            return {"error": "Bootstrap integrity validation failed"}
-
-    # Create splits
+    # Create splits (hold-out set is carved out *before* any bootstrapping to
+    # guarantee no duplicated patients leak into evaluation data).
     splitter = PatientLevelSplitter(random_state=random_state)
     splits = splitter.create_splits(
         cohort_df, cohort_waveforms, outcome_label, use_cv=use_cv, n_folds=n_folds
     )
+
+    # Initialise bootstrapper once if we are going to use it on the training
+    # portion(s) only – never on validation or hold-out data.
+    if bootstrap_patients:
+        from splitter import PatientBootstrapper
+
+        bootstrapper = PatientBootstrapper(random_state=random_state)
+    else:
+        bootstrapper = None
 
     results = {
         "experiment_config": {
@@ -516,9 +505,18 @@ def run_experiment(
         for fold_data in track(splits["cv_folds"], description="Training CV folds"):
             fold_idx = fold_data["fold"]
 
+            # Optionally apply bootstrapping to **training data only** for this fold
+            train_meta = fold_data["train"]["metadata"]
+            train_waves = fold_data["train"]["waveforms"]
+
+            if bootstrapper is not None:
+                train_meta, train_waves = bootstrapper.bootstrap_minority_patients(
+                    train_meta, train_waves, outcome_label
+                )
+
             pipeline, train_metrics, val_metrics = train_single_fold(
-                fold_data["train"]["metadata"],
-                fold_data["train"]["waveforms"],
+                train_meta,
+                train_waves,
                 fold_data["val"]["metadata"],
                 fold_data["val"]["waveforms"],
                 outcome_label,
@@ -537,7 +535,7 @@ def run_experiment(
                     "fold": fold_idx,
                     "train_metrics": train_metrics,
                     "val_metrics": val_metrics,
-                    "train_size": len(fold_data["train"]["metadata"]),
+                    "train_size": len(train_meta),
                     "val_size": len(fold_data["val"]["metadata"]),
                 }
             )
@@ -559,10 +557,20 @@ def run_experiment(
         best_model = fold_models[best_fold_idx]
 
     else:
-        # Simple train/val split
+        # Apply bootstrapping to the training partition if requested
+        simple_train_meta = splits["train"]["metadata"]
+        simple_train_waves = splits["train"]["waveforms"]
+
+        if bootstrapper is not None:
+            simple_train_meta, simple_train_waves = (
+                bootstrapper.bootstrap_minority_patients(
+                    simple_train_meta, simple_train_waves, outcome_label
+                )
+            )
+
         pipeline, train_metrics, val_metrics = train_single_fold(
-            splits["train"]["metadata"],
-            splits["train"]["waveforms"],
+            simple_train_meta,
+            simple_train_waves,
             splits["val"]["metadata"],
             splits["val"]["waveforms"],
             outcome_label,
@@ -578,7 +586,7 @@ def run_experiment(
 
         results["train_metrics"] = train_metrics
         results["val_metrics"] = val_metrics
-        results["train_size"] = len(splits["train"]["metadata"])
+        results["train_size"] = len(simple_train_meta)
         results["val_size"] = len(splits["val"]["metadata"])
 
         best_model = pipeline
