@@ -40,7 +40,7 @@ EXPERIMENT_CONFIGS = {
     "lead_configs": ["all"],  # Focus on all leads only - single lead shows no signal
     "augmentation": [True, False],
     "oversampling": [True, False],
-    "regularization": ["l1", "l2"],  # Test different regularization types
+    "regularization": ["l2"],  # Focus on L2 only - L1 too extreme at this C value
 }
 
 
@@ -63,7 +63,7 @@ def run_single_experiment(config, results_base_dir):
         results_base_dir,
         "--cv",  # Always use CV for comprehensive evaluation
         "--n-folds",
-        "5",
+        "3",
     ]
 
     if config["augmentation"]:
@@ -76,7 +76,7 @@ def run_single_experiment(config, results_base_dir):
     if config["model"] == "rocket_transformer":
         cmd.extend(["--class-weight", "balanced"])
         cmd.extend(["--penalty", config["regularization"]])
-        cmd.extend(["--C", "0.0001"])  # Use extreme regularization - optimal setting
+        cmd.extend(["--C", "0.001"])  # Use strong regularization - balanced setting
         cmd.extend(["--num-kernels", "2000"])  # Optimal kernel count for small dataset
 
     try:

@@ -669,7 +669,7 @@ def main():
     parser.add_argument(
         "--C",
         type=float,
-        default=0.0001,
+        default=0.001,
         help="Logistic regression regularization parameter (smaller = more regularization)",
     )
     parser.add_argument(
