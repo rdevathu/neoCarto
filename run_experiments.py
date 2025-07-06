@@ -76,8 +76,8 @@ def run_single_experiment(config, results_base_dir):
     if config["model"] == "rocket_transformer":
         cmd.extend(["--class-weight", "balanced"])
         cmd.extend(["--penalty", config["regularization"]])
-        cmd.extend(["--C", "0.1"])  # Use stronger regularization
-        cmd.extend(["--num-kernels", "5000"])  # Reduce kernels for small dataset
+        cmd.extend(["--C", "0.01"])  # Use very strong regularization
+        cmd.extend(["--num-kernels", "3000"])  # Reduce kernels for small dataset
 
     try:
         result = subprocess.run(
