@@ -38,8 +38,8 @@ EXPERIMENT_CONFIGS = {
     ],
     "models": ["rocket_transformer", "resnet"],
     "lead_configs": ["all"],  # Focus on all leads only - single lead shows no signal
-    "augmentation": [True, False],
-    "oversampling": [True, False],
+    "augmentation": [False],  # Optimal: no augmentation for small dataset
+    "oversampling": [False],  # Optimal: class weighting sufficient
     "regularization": ["l2"],  # Focus on L2 only - L1 too extreme at this C value
 }
 
@@ -78,6 +78,7 @@ def run_single_experiment(config, results_base_dir):
         cmd.extend(["--penalty", config["regularization"]])
         cmd.extend(["--C", "0.0001"])  # Optimal hyperparameter from search
         cmd.extend(["--num-kernels", "1000"])  # Optimal kernel count from search
+        # Note: Augmentation and oversampling handled by config flags above
 
     try:
         result = subprocess.run(
