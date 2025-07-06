@@ -308,6 +308,241 @@ class PatientLevelSplitter:
         return splits
 
 
+class PatientBootstrapper:
+    """
+    Class to handle patient-level bootstrapping for minority class patients.
+    Ensures no data leakage by bootstrapping at the patient level.
+    """
+
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+        np.random.seed(random_state)
+
+    def bootstrap_minority_patients(
+        self,
+        metadata_df: pd.DataFrame,
+        waveforms: np.ndarray,
+        outcome_label: str,
+        target_balance_ratio: float = 0.3,
+        min_multiplier: int = 2,
+        max_multiplier: int = 5,
+    ) -> Tuple[pd.DataFrame, np.ndarray]:
+        """
+        Bootstrap minority class patients to improve class balance.
+
+        Args:
+            metadata_df: ECG metadata DataFrame
+            waveforms: ECG waveform array
+            outcome_label: Column name for outcome to bootstrap on
+            target_balance_ratio: Target positive class ratio (0.3 = 30%)
+            min_multiplier: Minimum number of times to duplicate minority patients
+            max_multiplier: Maximum number of times to duplicate minority patients
+
+        Returns:
+            Tuple of (bootstrapped_metadata, bootstrapped_waveforms)
+        """
+        if "mrn" not in metadata_df.columns:
+            raise ValueError("mrn column required for patient-level bootstrapping")
+
+        # Calculate current class distribution
+        current_positive_rate = metadata_df[outcome_label].mean()
+        n_total = len(metadata_df)
+        n_positive = metadata_df[outcome_label].sum()
+        n_negative = n_total - n_positive
+
+        logger.info(f"Current class distribution:")
+        logger.info(f"  Positive: {n_positive}/{n_total} ({current_positive_rate:.3f})")
+        logger.info(
+            f"  Negative: {n_negative}/{n_total} ({1 - current_positive_rate:.3f})"
+        )
+
+        # If already balanced enough, return original data
+        if current_positive_rate >= target_balance_ratio:
+            logger.info(
+                f"Already balanced (≥{target_balance_ratio:.3f}), skipping bootstrap"
+            )
+            return metadata_df, waveforms
+
+        # Get minority class patients (those with positive outcomes)
+        minority_patients = self._get_minority_patients(metadata_df, outcome_label)
+
+        if len(minority_patients) == 0:
+            logger.warning("No minority class patients found, skipping bootstrap")
+            return metadata_df, waveforms
+
+        # Calculate how many additional positive samples we need
+        target_positive_count = int(
+            n_negative * target_balance_ratio / (1 - target_balance_ratio)
+        )
+        additional_positive_needed = max(0, target_positive_count - n_positive)
+
+        # Calculate bootstrap multiplier
+        if additional_positive_needed == 0:
+            logger.info("No additional positive samples needed")
+            return metadata_df, waveforms
+
+        multiplier = min(
+            max_multiplier,
+            max(
+                min_multiplier,
+                int(np.ceil(additional_positive_needed / len(minority_patients))),
+            ),
+        )
+
+        logger.info(f"Bootstrapping strategy:")
+        logger.info(f"  Target positive ratio: {target_balance_ratio:.3f}")
+        logger.info(
+            f"  Additional positive samples needed: {additional_positive_needed}"
+        )
+        logger.info(f"  Minority patients to bootstrap: {len(minority_patients)}")
+        logger.info(f"  Bootstrap multiplier: {multiplier}")
+
+        # Bootstrap minority patients
+        bootstrapped_metadata, bootstrapped_waveforms = self._bootstrap_patients(
+            metadata_df, waveforms, minority_patients, multiplier
+        )
+
+        # Validate result
+        final_positive_rate = bootstrapped_metadata[outcome_label].mean()
+        final_n_total = len(bootstrapped_metadata)
+        final_n_positive = bootstrapped_metadata[outcome_label].sum()
+
+        logger.info(f"After bootstrapping:")
+        logger.info(f"  Total samples: {final_n_total} (+{final_n_total - n_total})")
+        logger.info(
+            f"  Positive: {final_n_positive}/{final_n_total} ({final_positive_rate:.3f})"
+        )
+        logger.info(
+            f"  Improvement: {final_positive_rate - current_positive_rate:+.3f}"
+        )
+
+        return bootstrapped_metadata, bootstrapped_waveforms
+
+    def _get_minority_patients(
+        self, metadata_df: pd.DataFrame, outcome_label: str
+    ) -> List[str]:
+        """Get list of minority class patients (those with positive outcomes)."""
+        # Get patients with at least one positive outcome
+        patient_outcomes = metadata_df.groupby("mrn")[outcome_label].max()
+        minority_patients = patient_outcomes[patient_outcomes == 1].index.tolist()
+
+        logger.info(f"Identified {len(minority_patients)} minority class patients")
+        return minority_patients
+
+    def _bootstrap_patients(
+        self,
+        metadata_df: pd.DataFrame,
+        waveforms: np.ndarray,
+        minority_patients: List[str],
+        multiplier: int,
+    ) -> Tuple[pd.DataFrame, np.ndarray]:
+        """Bootstrap specific patients by duplicating all their ECGs."""
+        # Start with original data
+        bootstrapped_metadata = metadata_df.copy()
+        bootstrapped_waveforms = waveforms.copy()
+
+        # For each minority patient, duplicate their ECGs (multiplier-1) times
+        for patient_mrn in minority_patients:
+            patient_ecgs = metadata_df[metadata_df["mrn"] == patient_mrn]
+            patient_indices = patient_ecgs.index.values
+            patient_waveforms = waveforms[patient_indices]
+
+            # Duplicate this patient's data (multiplier-1) times
+            for duplication_idx in range(multiplier - 1):
+                # Create new metadata with modified indices
+                duplicated_metadata = patient_ecgs.copy()
+
+                # Add suffix to distinguish duplicated entries (for debugging)
+                duplicated_metadata["mrn"] = (
+                    duplicated_metadata["mrn"].astype(str)
+                    + f"_dup_{duplication_idx + 1}"
+                )
+
+                # Reset index to avoid conflicts
+                duplicated_metadata = duplicated_metadata.reset_index(drop=True)
+
+                # Append to bootstrapped data
+                bootstrapped_metadata = pd.concat(
+                    [bootstrapped_metadata, duplicated_metadata], ignore_index=True
+                )
+                bootstrapped_waveforms = np.vstack(
+                    [bootstrapped_waveforms, patient_waveforms]
+                )
+
+        logger.info(f"Bootstrap complete: {len(bootstrapped_metadata)} total ECGs")
+        return bootstrapped_metadata, bootstrapped_waveforms
+
+    def validate_bootstrap_integrity(
+        self,
+        original_metadata: pd.DataFrame,
+        bootstrapped_metadata: pd.DataFrame,
+        outcome_label: str,
+    ) -> bool:
+        """
+        Validate that bootstrapping maintains patient integrity.
+
+        Args:
+            original_metadata: Original metadata before bootstrapping
+            bootstrapped_metadata: Metadata after bootstrapping
+            outcome_label: Outcome column to validate
+
+        Returns:
+            True if validation passes, False otherwise
+        """
+        logger.info("Validating bootstrap integrity...")
+
+        # Check 1: No new unique patients should be created (only duplicates)
+        original_base_mrns = set(
+            str(mrn).split("_dup_")[0] for mrn in original_metadata["mrn"].unique()
+        )
+        bootstrapped_base_mrns = set(
+            str(mrn).split("_dup_")[0] for mrn in bootstrapped_metadata["mrn"].unique()
+        )
+
+        if original_base_mrns != bootstrapped_base_mrns:
+            logger.error("Bootstrap integrity check failed: New patients detected")
+            return False
+
+        # Check 2: All original ECGs should be preserved
+        original_count = len(original_metadata)
+        original_ecgs_in_bootstrap = len(
+            bootstrapped_metadata[
+                ~bootstrapped_metadata["mrn"]
+                .astype(str)
+                .str.contains("_dup_", na=False)
+            ]
+        )
+
+        if original_count != original_ecgs_in_bootstrap:
+            logger.error(
+                "Bootstrap integrity check failed: Original ECGs not preserved"
+            )
+            return False
+
+        # Check 3: Only minority class patients should be duplicated
+        duplicated_mrns = (
+            bootstrapped_metadata[
+                bootstrapped_metadata["mrn"].astype(str).str.contains("_dup_", na=False)
+            ]["mrn"]
+            .apply(lambda x: str(x).split("_dup_")[0])
+            .unique()
+        )
+
+        for mrn in duplicated_mrns:
+            # Convert mrn to appropriate type for comparison
+            patient_outcomes = original_metadata[
+                original_metadata["mrn"].astype(str) == str(mrn)
+            ][outcome_label]
+            if len(patient_outcomes) > 0 and patient_outcomes.max() != 1:
+                logger.error(
+                    f"Bootstrap integrity check failed: Non-minority patient {mrn} was duplicated"
+                )
+                return False
+
+        logger.info("Bootstrap integrity validation passed")
+        return True
+
+
 if __name__ == "__main__":
     # Test splitting
     logging.basicConfig(level=logging.INFO)
@@ -335,9 +570,18 @@ if __name__ == "__main__":
         processed_df, waveforms, "pre_ecg_1y", "af_recurrence_1y"
     )
 
+    # Test bootstrapping
+    bootstrapper = PatientBootstrapper(random_state=42)
+    boot_df, boot_waveforms = bootstrapper.bootstrap_minority_patients(
+        cohort_df, cohort_waveforms, "af_recurrence_1y"
+    )
+
+    # Validate bootstrap
+    bootstrapper.validate_bootstrap_integrity(cohort_df, boot_df, "af_recurrence_1y")
+
     # Create splits
     splits = splitter.create_splits(
-        cohort_df, cohort_waveforms, "af_recurrence_1y", use_cv=True, n_folds=3
+        boot_df, boot_waveforms, "af_recurrence_1y", use_cv=True, n_folds=3
     )
 
     print(f"Created splits with {len(splits['cv_folds'])} CV folds")

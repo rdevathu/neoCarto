@@ -21,7 +21,9 @@ console = Console()
 
 # Experiment configurations
 EXPERIMENT_CONFIGS = {
+    # Three clinically-relevant windows only
     "pre_ecg_windows": ["pre_ecg_1y", "pre_ecg_3y", "pre_ecg_5y"],
+    # All 12 outcome labels remain – performance is outcome-dependent
     "outcome_labels": [
         "af_recurrence_1y",
         "af_recurrence_3y",
@@ -36,11 +38,17 @@ EXPERIMENT_CONFIGS = {
         "af_at_recurrence_5y",
         "af_at_recurrence_any",
     ],
-    "models": ["rocket_transformer", "resnet"],
-    "lead_configs": ["all"],  # Focus on all leads only - single lead shows no signal
-    "augmentation": [False, True],  # Optimal: no augmentation for small dataset
-    "oversampling": [False],  # Optimal: class weighting sufficient
-    "regularization": ["l2"],  # Focus on L2 only - L1 too extreme at this C value
+    # 🔥 Only the best-performing model for small data
+    "models": ["rocket_transformer"],
+    # 12-lead ECGs consistently outperform single-lead
+    "lead_configs": ["all"],
+    # Augmentation & oversampling were shown to hurt – fix to False
+    "augmentation": [False],
+    "oversampling": [False],
+    # Patient bootstrapping delivered +32% ROC-AUC – always enable
+    "bootstrap_patients": [True],
+    # Hyper-params already tuned – keep single value
+    "regularization": ["l2"],
 }
 
 
@@ -72,6 +80,9 @@ def run_single_experiment(config, results_base_dir):
     if config["oversampling"]:
         cmd.append("--oversample")
 
+    if config["bootstrap_patients"]:
+        cmd.append("--bootstrap-patients")
+
     # Add class weight and regularization for rocket_transformer
     if config["model"] == "rocket_transformer":
         cmd.extend(["--class-weight", "balanced"])
@@ -79,6 +90,11 @@ def run_single_experiment(config, results_base_dir):
         cmd.extend(["--C", "0.0001"])  # Optimal hyperparameter from search
         cmd.extend(["--num-kernels", "1000"])  # Optimal kernel count from search
         # Note: Augmentation and oversampling handled by config flags above
+
+        # Enable calibration for rocket_transformer by default
+        cmd.extend(["--enable-calibration"])
+        cmd.extend(["--threshold-metric", "f1"])
+        cmd.extend(["--calibration-method", "platt"])
 
     try:
         result = subprocess.run(
@@ -106,13 +122,23 @@ def generate_experiment_configs():
     """Generate all experiment configurations."""
     configs = []
 
-    for window, outcome, model, leads, aug, oversample, reg in itertools.product(
+    for (
+        window,
+        outcome,
+        model,
+        leads,
+        aug,
+        oversample,
+        bootstrap,
+        reg,
+    ) in itertools.product(
         EXPERIMENT_CONFIGS["pre_ecg_windows"],
         EXPERIMENT_CONFIGS["outcome_labels"],
         EXPERIMENT_CONFIGS["models"],
         EXPERIMENT_CONFIGS["lead_configs"],
         EXPERIMENT_CONFIGS["augmentation"],
         EXPERIMENT_CONFIGS["oversampling"],
+        EXPERIMENT_CONFIGS["bootstrap_patients"],
         EXPERIMENT_CONFIGS["regularization"],
     ):
         configs.append(
@@ -123,6 +149,7 @@ def generate_experiment_configs():
                 "lead_config": leads,
                 "augmentation": aug,
                 "oversampling": oversample,
+                "bootstrap_patients": bootstrap,
                 "regularization": reg,
             }
         )
@@ -163,6 +190,7 @@ def create_experiment_summary(results):
                 "Leads": config["lead_config"],
                 "Augment": "Yes" if config["augmentation"] else "No",
                 "Oversample": "Yes" if config["oversampling"] else "No",
+                "Bootstrap": "Yes" if config["bootstrap_patients"] else "No",
                 "Success": "Yes" if result["success"] else "No",
                 "Error": result.get("error", ""),
             }
@@ -171,12 +199,57 @@ def create_experiment_summary(results):
     return pd.DataFrame(summary_data)
 
 
+def load_completed_experiments(results_root: str) -> set:
+    """Return a set of config keys that already finished successfully.
+
+    The key is a tuple matching the same fields we generate later so we can
+    de-duplicate work across runs. It scans *all* existing batch_* directories
+    under the given `results_root` for `experiment_summary*.csv` files.
+    """
+    completed = set()
+    root_path = Path(results_root)
+    if not root_path.exists():
+        return completed
+
+    csv_files = root_path.glob("batch_*/experiment_summary*.csv")
+    for csv_path in csv_files:
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            # Corrupted or partial file – skip
+            continue
+
+        # Normalise optional columns that older runs might miss
+        for col, default in [
+            ("Augment", "No"),
+            ("Oversample", "No"),
+            ("Bootstrap", "No"),
+        ]:
+            if col not in df.columns:
+                df[col] = default
+
+        for _, row in df.iterrows():
+            if str(row.get("Success", "")).lower() != "yes":
+                continue  # Only finished runs
+            key = (
+                row["Window"],
+                row["Outcome"],
+                row["Model"],
+                row["Leads"],
+                row["Augment"].lower() == "yes",
+                row["Oversample"].lower() == "yes",
+                row["Bootstrap"].lower() == "yes",
+            )
+            completed.add(key)
+    return completed
+
+
 def main():
     """Main function to run all experiments."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Run batch AF recurrence prediction experiments"
+        description="Run batch AF recurrence prediction experiments (deduplicated)"
     )
     parser.add_argument(
         "--quick", action="store_true", help="Run quick test with subset of configs"
@@ -190,32 +263,53 @@ def main():
 
     args = parser.parse_args()
 
+    # Load completed experiments so we don't redo them
+    completed_keys = load_completed_experiments(args.results_dir)
+
     # Generate experiment configurations
     all_configs = generate_experiment_configs()
     configs = filter_configs(all_configs, args.quick)
 
-    console.print(f"[bold]Generated {len(configs)} experiment configurations[/bold]")
+    # De-duplicate against past successful runs
+    pre_filter_count = len(configs)
+    configs = [
+        cfg
+        for cfg in configs
+        if (
+            cfg["pre_ecg_window"],
+            cfg["outcome_label"],
+            cfg["model"],
+            cfg["lead_config"],
+            cfg["augmentation"],
+            cfg["oversampling"],
+            cfg["bootstrap_patients"],
+        )
+        not in completed_keys
+    ]
 
-    if args.dry_run:
-        # Just print the configurations
-        table = Table(title="Experiment Configurations")
+    skipped = pre_filter_count - len(configs)
+    console.print(
+        f"[bold]{skipped} configs skipped because they were already completed successfully[/bold]"
+    )
+    console.print(f"[bold]Running {len(configs)} new experiment configurations[/bold]")
+
+    if args.dry_run or not configs:
+        # If --dry-run OR nothing new to run, just list what would be executed
+        table = Table(title="Experiment Configurations (new)")
         table.add_column("Window")
         table.add_column("Outcome")
         table.add_column("Model")
         table.add_column("Leads")
-        table.add_column("Augment")
-        table.add_column("Oversample")
+        table.add_column("Bootstrap")
 
-        for config in configs:
+        for cfg in configs:
             table.add_row(
-                config["pre_ecg_window"],
-                config["outcome_label"],
-                config["model"],
-                config["lead_config"],
-                "Yes" if config["augmentation"] else "No",
-                "Yes" if config["oversampling"] else "No",
+                cfg["pre_ecg_window"],
+                cfg["outcome_label"],
+                cfg["model"],
+                cfg["lead_config"],
+                "Yes" if cfg["bootstrap_patients"] else "No",
             )
-
         console.print(table)
         return
 

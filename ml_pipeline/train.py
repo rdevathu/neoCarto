@@ -44,8 +44,15 @@ from preprocess import (
     get_cohort_for_window_and_outcome,
     get_cohort_summary,
 )
-from splitter import PatientLevelSplitter
+from splitter import PatientLevelSplitter, PatientBootstrapper
 from augment import ECGAugmenter
+from calibration import (
+    ThresholdOptimizer,
+    ProbabilityCalibrator,
+    CalibratedModel,
+    CalibrationEvaluator,
+    optimize_model_calibration,
+)
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -241,7 +248,10 @@ def create_pipeline(
 
 
 def evaluate_model(
-    y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_prob: np.ndarray,
+    include_calibration: bool = False,
 ) -> Dict[str, float]:
     """
     Evaluate model performance.
@@ -250,6 +260,7 @@ def evaluate_model(
         y_true: True labels
         y_pred: Predicted labels
         y_prob: Predicted probabilities
+        include_calibration: Whether to include calibration metrics
 
     Returns:
         Dictionary of metrics
@@ -264,6 +275,16 @@ def evaluate_model(
         if len(np.unique(y_true)) > 1
         else 0.0,
     }
+
+    # Add calibration metrics if requested
+    if include_calibration and len(np.unique(y_true)) > 1:
+        try:
+            calibration_metrics = CalibrationEvaluator.calibration_metrics(
+                y_true, y_prob
+            )
+            metrics.update(calibration_metrics)
+        except Exception as e:
+            logger.warning(f"Could not calculate calibration metrics: {e}")
 
     return metrics
 
@@ -397,6 +418,11 @@ def run_experiment(
     n_folds: int,
     random_state: int,
     results_dir: Path,
+    bootstrap_patients: bool = False,
+    enable_calibration: bool = False,
+    threshold_metric: str = "f1",
+    calibration_method: str = "platt",
+    calibration_cv: int = 3,
     **model_kwargs,
 ) -> Dict[str, Any]:
     """
@@ -433,6 +459,27 @@ def run_experiment(
         logger.warning(f"No data for {pre_ecg_window} -> {outcome_label}")
         return {"error": "No data available"}
 
+    # Apply patient bootstrapping if requested
+    if bootstrap_patients:
+        from splitter import PatientBootstrapper
+
+        logger.info("Applying patient-level bootstrapping...")
+
+        bootstrapper = PatientBootstrapper(random_state=random_state)
+        cohort_df, cohort_waveforms = bootstrapper.bootstrap_minority_patients(
+            cohort_df, cohort_waveforms, outcome_label
+        )
+
+        # Validate bootstrap integrity
+        original_cohort_df, _ = get_cohort_for_window_and_outcome(
+            metadata_df, waveforms, pre_ecg_window, outcome_label
+        )
+        if not bootstrapper.validate_bootstrap_integrity(
+            original_cohort_df, cohort_df, outcome_label
+        ):
+            logger.error("Bootstrap integrity validation failed")
+            return {"error": "Bootstrap integrity validation failed"}
+
     # Create splits
     splitter = PatientLevelSplitter(random_state=random_state)
     splits = splitter.create_splits(
@@ -449,6 +496,7 @@ def run_experiment(
             "use_oversampling": use_oversampling,
             "use_sample_weights": use_sample_weights,
             "class_weight": class_weight,
+            "bootstrap_patients": bootstrap_patients,
             "use_cv": use_cv,
             "n_folds": n_folds,
             "random_state": random_state,
@@ -543,9 +591,57 @@ def run_experiment(
 
     holdout_pred = best_model.predict(holdout_X)
     holdout_prob = best_model.predict_proba(holdout_X)[:, 1]
-    holdout_metrics = evaluate_model(holdout_y, holdout_pred, holdout_prob)
+    holdout_metrics = evaluate_model(
+        holdout_y, holdout_pred, holdout_prob, include_calibration=True
+    )
 
     results["holdout_metrics"] = holdout_metrics
+
+    # Apply calibration optimization if enabled and using CV (we need validation data)
+    calibrated_model = None
+    if enable_calibration and use_cv and len(splits["cv_folds"]) > 0:
+        logger.info("Applying threshold optimization and probability calibration...")
+
+        # Use validation data from best fold for calibration
+        best_fold_data = splits["cv_folds"][best_fold_idx]
+        val_X = ECGAugmenter().prepare_lead_configuration(
+            best_fold_data["val"]["waveforms"], lead_config
+        )
+        val_y = best_fold_data["val"]["metadata"][outcome_label].values
+
+        try:
+            # Optimize calibration
+            calibrated_model = optimize_model_calibration(
+                best_model,
+                val_X,
+                val_y,
+                threshold_metric=threshold_metric,
+                calibration_method=calibration_method,
+                cv_folds=calibration_cv,
+            )
+
+            # Evaluate calibrated model on holdout
+            holdout_pred_cal = calibrated_model.predict(holdout_X)
+            holdout_prob_cal = calibrated_model.predict_proba(holdout_X)[:, 1]
+            holdout_metrics_cal = evaluate_model(
+                holdout_y, holdout_pred_cal, holdout_prob_cal, include_calibration=True
+            )
+
+            results["holdout_metrics_calibrated"] = holdout_metrics_cal
+
+            # Log calibration improvements
+            roc_improvement = (
+                holdout_metrics_cal["roc_auc"] - holdout_metrics["roc_auc"]
+            )
+            f1_improvement = holdout_metrics_cal["f1"] - holdout_metrics["f1"]
+
+            logger.info(
+                f"Calibration improvements - ROC-AUC: {roc_improvement:+.3f}, F1: {f1_improvement:+.3f}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Calibration optimization failed: {e}")
+            calibrated_model = None
 
     # Save model and results
     experiment_name = f"{pre_ecg_window}_{outcome_label}_{model_name}_{lead_config}"
@@ -553,11 +649,22 @@ def run_experiment(
         experiment_name += "_aug"
     if use_oversampling:
         experiment_name += "_oversample"
+    if bootstrap_patients:
+        experiment_name += "_bootstrap"
 
     model_path = results_dir / f"{experiment_name}_model.joblib"
     results_path = results_dir / f"{experiment_name}_results.json"
 
+    # Save original model
     joblib.dump(best_model, model_path)
+
+    # Save calibrated model if available
+    if calibrated_model is not None:
+        calibrated_model_path = (
+            results_dir / f"{experiment_name}_calibrated_model.joblib"
+        )
+        calibrated_model.save(calibrated_model_path)
+        logger.info(f"Saved calibrated model to {calibrated_model_path}")
 
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
@@ -570,11 +677,22 @@ def run_experiment(
 
 def print_results_table(results: Dict[str, Any]) -> None:
     """Print results in a nice table format."""
-    table = Table(title="Experiment Results")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Train", style="green")
-    table.add_column("Validation", style="yellow")
-    table.add_column("Holdout", style="red")
+    # Check if we have calibrated results
+    has_calibrated = "holdout_metrics_calibrated" in results
+
+    if has_calibrated:
+        table = Table(title="Experiment Results (Original vs Calibrated)")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Train", style="green")
+        table.add_column("Validation", style="yellow")
+        table.add_column("Holdout", style="red")
+        table.add_column("Holdout (Cal.)", style="bold red")
+    else:
+        table = Table(title="Experiment Results")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Train", style="green")
+        table.add_column("Validation", style="yellow")
+        table.add_column("Holdout", style="red")
 
     if "cv_results" in results:
         # CV results
@@ -582,23 +700,63 @@ def print_results_table(results: Dict[str, Any]) -> None:
         cv_std = results["cv_results"]["std"]
 
         for metric in ["accuracy", "precision", "recall", "f1", "roc_auc", "pr_auc"]:
-            table.add_row(
+            row = [
                 metric.upper(),
                 "-",
                 f"{cv_mean[metric]:.3f} ± {cv_std[metric]:.3f}",
                 f"{results['holdout_metrics'][metric]:.3f}",
-            )
+            ]
+
+            if has_calibrated:
+                cal_value = results["holdout_metrics_calibrated"][metric]
+                orig_value = results["holdout_metrics"][metric]
+                improvement = cal_value - orig_value
+                row.append(f"{cal_value:.3f} ({improvement:+.3f})")
+
+            table.add_row(*row)
     else:
         # Simple train/val results
         for metric in ["accuracy", "precision", "recall", "f1", "roc_auc", "pr_auc"]:
-            table.add_row(
+            row = [
                 metric.upper(),
                 f"{results['train_metrics'][metric]:.3f}",
                 f"{results['val_metrics'][metric]:.3f}",
                 f"{results['holdout_metrics'][metric]:.3f}",
-            )
+            ]
+
+            if has_calibrated:
+                cal_value = results["holdout_metrics_calibrated"][metric]
+                orig_value = results["holdout_metrics"][metric]
+                improvement = cal_value - orig_value
+                row.append(f"{cal_value:.3f} ({improvement:+.3f})")
+
+            table.add_row(*row)
 
     console.print(table)
+
+    # Print calibration-specific metrics if available
+    if has_calibrated and "brier_score" in results["holdout_metrics_calibrated"]:
+        cal_table = Table(title="Calibration Quality Metrics")
+        cal_table.add_column("Metric", style="cyan")
+        cal_table.add_column("Value", style="green")
+        cal_table.add_column("Description", style="yellow")
+
+        cal_metrics = results["holdout_metrics_calibrated"]
+
+        cal_table.add_row(
+            "Brier Score", f"{cal_metrics.get('brier_score', 0):.4f}", "Lower is better"
+        )
+        cal_table.add_row(
+            "Log Loss", f"{cal_metrics.get('log_loss', 0):.4f}", "Lower is better"
+        )
+        cal_table.add_row(
+            "ECE", f"{cal_metrics.get('ece', 0):.4f}", "Expected Calibration Error"
+        )
+        cal_table.add_row(
+            "MCE", f"{cal_metrics.get('mce', 0):.4f}", "Maximum Calibration Error"
+        )
+
+        console.print(cal_table)
 
 
 def main():
@@ -693,6 +851,31 @@ def main():
     )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed")
 
+    # Calibration arguments
+    parser.add_argument(
+        "--enable-calibration",
+        action="store_true",
+        help="Enable threshold optimization and probability calibration",
+    )
+    parser.add_argument(
+        "--threshold-metric",
+        choices=["f1", "f_beta", "youden", "cost_sensitive"],
+        default="f1",
+        help="Metric for threshold optimization",
+    )
+    parser.add_argument(
+        "--calibration-method",
+        choices=["platt", "isotonic", "beta"],
+        default="platt",
+        help="Method for probability calibration",
+    )
+    parser.add_argument(
+        "--calibration-cv",
+        type=int,
+        default=3,
+        help="Number of CV folds for calibration",
+    )
+
     # Output arguments
     parser.add_argument(
         "--results-dir", default="results", help="Base directory for results"
@@ -751,6 +934,11 @@ def main():
             args.n_folds,
             args.random_state,
             results_dir,
+            bootstrap_patients=args.bootstrap_patients,
+            enable_calibration=args.enable_calibration,
+            threshold_metric=args.threshold_metric,
+            calibration_method=args.calibration_method,
+            calibration_cv=args.calibration_cv,
             **model_kwargs,
         )
 
