@@ -235,6 +235,91 @@ def get_fold_statistics(
     return pd.DataFrame(stats)
 
 
+def bootstrap_minority_patients(
+    metadata_df: pd.DataFrame,
+    waveforms: np.ndarray,
+    outcome_label: str,
+    target_ratio: float = 0.3,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, np.ndarray]:
+    """
+    Bootstrap minority class patients to improve class balance.
+
+    Args:
+        metadata_df: ECG metadata DataFrame
+        waveforms: ECG waveform array
+        outcome_label: Column name for outcome
+        target_ratio: Target positive class ratio
+        random_state: Random seed
+
+    Returns:
+        Tuple of (augmented_metadata, augmented_waveforms)
+    """
+    np.random.seed(random_state)
+
+    # Get current class distribution
+    pos_count = metadata_df[outcome_label].sum()
+    total_count = len(metadata_df)
+    current_ratio = pos_count / total_count
+
+    logger.info(f"Current positive ratio: {current_ratio:.3f}")
+    logger.info(f"Target positive ratio: {target_ratio:.3f}")
+
+    if current_ratio >= target_ratio:
+        logger.info("Already at target ratio, no bootstrapping needed")
+        return metadata_df, waveforms
+
+    # Calculate how many positive samples we need
+    target_pos_count = int(total_count * target_ratio / (1 - target_ratio))
+    additional_pos_needed = target_pos_count - pos_count
+
+    if additional_pos_needed <= 0:
+        return metadata_df, waveforms
+
+    # Get positive class patients
+    pos_patients = metadata_df[metadata_df[outcome_label] == 1]["mrn"].unique()
+
+    # Bootstrap patients (sample with replacement)
+    n_patients_to_bootstrap = min(additional_pos_needed // 2, len(pos_patients))
+    bootstrapped_patients = np.random.choice(
+        pos_patients, size=n_patients_to_bootstrap, replace=True
+    )
+
+    # Collect all ECGs from bootstrapped patients
+    bootstrap_rows = []
+    bootstrap_indices = []
+
+    for patient in bootstrapped_patients:
+        patient_ecgs = metadata_df[metadata_df["mrn"] == patient]
+        for _, row in patient_ecgs.iterrows():
+            bootstrap_rows.append(row.copy())
+            bootstrap_indices.append(row.name)
+
+    if len(bootstrap_rows) == 0:
+        return metadata_df, waveforms
+
+    # Create augmented dataset
+    bootstrap_df = pd.DataFrame(bootstrap_rows)
+    bootstrap_waveforms = waveforms[bootstrap_indices]
+
+    # Combine with original data
+    augmented_metadata = pd.concat([metadata_df, bootstrap_df], ignore_index=True)
+    augmented_waveforms = np.concatenate([waveforms, bootstrap_waveforms], axis=0)
+
+    # Log results
+    new_pos_count = augmented_metadata[outcome_label].sum()
+    new_total_count = len(augmented_metadata)
+    new_ratio = new_pos_count / new_total_count
+
+    logger.info(
+        f"Added {len(bootstrap_df)} ECGs from {len(set(bootstrapped_patients))} patients"
+    )
+    logger.info(f"New positive ratio: {new_ratio:.3f}")
+    logger.info(f"New dataset size: {new_total_count} ECGs")
+
+    return augmented_metadata, augmented_waveforms
+
+
 if __name__ == "__main__":
     # Test the CV helpers
     import sys

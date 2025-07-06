@@ -98,10 +98,12 @@ def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs
             from sklearn.linear_model import LogisticRegression
 
             # Extract parameters
-            num_kernels = kwargs.get("num_kernels", 10000)
-            C = kwargs.get("C", 1.0)
+            num_kernels = kwargs.get("num_kernels", 5000)
+            C = kwargs.get("C", 0.1)
             class_weight = kwargs.get("class_weight", None)
-            max_iter = kwargs.get("max_iter", 1000)
+            max_iter = kwargs.get("max_iter", 2000)
+            penalty = kwargs.get("penalty", "l2")
+            l1_ratio = kwargs.get("l1_ratio", 0.5)
 
             # Create ROCKET transformer
             rocket_transformer = Rocket(
@@ -110,14 +112,32 @@ def get_model(model_name: str, n_features: int, random_state: int = 42, **kwargs
                 n_jobs=-1,
             )
 
-            # Create logistic regression classifier
-            classifier = LogisticRegression(
-                C=C,
-                class_weight=class_weight,
-                max_iter=max_iter,
-                random_state=random_state,
-                n_jobs=-1,
+            # Create logistic regression classifier with appropriate solver
+            solver = (
+                "liblinear"
+                if penalty == "l1"
+                else "saga"
+                if penalty == "elasticnet"
+                else "lbfgs"
             )
+
+            classifier_kwargs = {
+                "C": C,
+                "class_weight": class_weight,
+                "max_iter": max_iter,
+                "random_state": random_state,
+                "n_jobs": -1
+                if solver != "liblinear"
+                else 1,  # liblinear doesn't support n_jobs
+                "solver": solver,
+                "penalty": penalty,
+            }
+
+            # Add l1_ratio for elasticnet
+            if penalty == "elasticnet":
+                classifier_kwargs["l1_ratio"] = l1_ratio
+
+            classifier = LogisticRegression(**classifier_kwargs)
 
             return rocket_transformer, classifier
         except ImportError:
@@ -633,19 +653,44 @@ def main():
         default=None,
         help="Class weight strategy (balanced, inverse, or ratio like 1:3)",
     )
+    parser.add_argument(
+        "--bootstrap-patients",
+        action="store_true",
+        help="Bootstrap minority class patients to improve balance",
+    )
 
     # Model-specific arguments
     parser.add_argument(
-        "--num-kernels", type=int, default=10000, help="Number of ROCKET kernels"
+        "--num-kernels",
+        type=int,
+        default=5000,
+        help="Number of ROCKET kernels (reduced for small datasets)",
     )
     parser.add_argument(
         "--C",
         type=float,
-        default=1.0,
-        help="Logistic regression regularization parameter",
+        default=0.1,
+        help="Logistic regression regularization parameter (smaller = more regularization)",
+    )
+    parser.add_argument(
+        "--penalty",
+        choices=["l1", "l2", "elasticnet"],
+        default="l2",
+        help="Regularization penalty type",
+    )
+    parser.add_argument(
+        "--l1-ratio",
+        type=float,
+        default=0.5,
+        help="L1 ratio for elasticnet penalty (0=L2, 1=L1)",
     )
     parser.add_argument("--cv", action="store_true", help="Use cross-validation")
-    parser.add_argument("--n-folds", type=int, default=5, help="Number of CV folds")
+    parser.add_argument(
+        "--n-folds",
+        type=int,
+        default=3,
+        help="Number of CV folds (reduced for small datasets)",
+    )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed")
 
     # Output arguments
@@ -687,6 +732,8 @@ def main():
         model_kwargs = {
             "num_kernels": args.num_kernels,
             "C": args.C,
+            "penalty": args.penalty,
+            "l1_ratio": args.l1_ratio,
         }
 
         results = run_experiment(

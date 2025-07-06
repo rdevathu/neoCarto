@@ -37,9 +37,10 @@ EXPERIMENT_CONFIGS = {
         "af_at_recurrence_any",
     ],
     "models": ["rocket_transformer", "resnet"],
-    "lead_configs": ["lead1", "all"],
+    "lead_configs": ["all"],  # Focus on all leads only - single lead shows no signal
     "augmentation": [True, False],
     "oversampling": [True, False],
+    "regularization": ["l1", "l2"],  # Test different regularization types
 }
 
 
@@ -71,9 +72,12 @@ def run_single_experiment(config, results_base_dir):
     if config["oversampling"]:
         cmd.append("--oversample")
 
-    # Add class weight for rocket_transformer
+    # Add class weight and regularization for rocket_transformer
     if config["model"] == "rocket_transformer":
         cmd.extend(["--class-weight", "balanced"])
+        cmd.extend(["--penalty", config["regularization"]])
+        cmd.extend(["--C", "0.1"])  # Use stronger regularization
+        cmd.extend(["--num-kernels", "5000"])  # Reduce kernels for small dataset
 
     try:
         result = subprocess.run(
@@ -101,13 +105,14 @@ def generate_experiment_configs():
     """Generate all experiment configurations."""
     configs = []
 
-    for window, outcome, model, leads, aug, oversample in itertools.product(
+    for window, outcome, model, leads, aug, oversample, reg in itertools.product(
         EXPERIMENT_CONFIGS["pre_ecg_windows"],
         EXPERIMENT_CONFIGS["outcome_labels"],
         EXPERIMENT_CONFIGS["models"],
         EXPERIMENT_CONFIGS["lead_configs"],
         EXPERIMENT_CONFIGS["augmentation"],
         EXPERIMENT_CONFIGS["oversampling"],
+        EXPERIMENT_CONFIGS["regularization"],
     ):
         configs.append(
             {
@@ -117,6 +122,7 @@ def generate_experiment_configs():
                 "lead_config": leads,
                 "augmentation": aug,
                 "oversampling": oversample,
+                "regularization": reg,
             }
         )
 
@@ -131,11 +137,13 @@ def filter_configs(configs, quick_run=False):
         for config in configs:
             if (
                 config["pre_ecg_window"] == "pre_ecg_1y"
-                and config["outcome_label"] in ["af_recurrence_1y", "at_recurrence_1y"]
+                and config["outcome_label"]
+                in ["af_recurrence_1y"]  # Focus on AF only first
                 and config["model"] == "rocket_transformer"
+                and config["lead_config"] == "all"  # Only all leads
             ):
                 filtered.append(config)
-        return filtered[:8]  # Just first 8 for quick test
+        return filtered[:4]  # Just first 4 for quick test
 
     return configs
 

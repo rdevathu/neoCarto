@@ -63,33 +63,51 @@ Use `RandomizedSearchCV(n_iter=8)` to finish in minutes.
 
 ## 4. Concrete Step-by-Step Plan for the LLM
 
-1. **Add utilities**
-   1. Implement `scripts/analyse_class_balance.py` to print positive-ratio per window/outcome.
-   2. Add `utils/cv_helpers.py` with `StratifiedGroupKFold` wrapper.
-2. **Refactor `train.py`**
-   1. Replace `get_model()` rocket branch with transformer + logistic approach above.
-   2. Insert optional `--class-weight balanced` flag.
-   3. Allow `--sample-weight` to toggle passing weights instead of oversampling.
-3. **Implement Hyper-Parameter Search** (only when `--tune` flag passed):
+### ✅ **COMPLETED STEPS:**
+1. **Add utilities** ✅
+   1. ✅ Implement `scripts/analyse_class_balance.py` to print positive-ratio per window/outcome.
+   2. ✅ Add `utils/cv_helpers.py` with `StratifiedGroupKFold` wrapper.
+2. **Refactor `train.py`** ✅
+   1. ✅ Replace `get_model()` rocket branch with transformer + logistic approach above.
+   2. ✅ Insert optional `--class-weight balanced` flag.
+   3. ✅ Allow `--sample-weight` to toggle passing weights instead of oversampling.
+
+### 🚨 **URGENT FIXES NEEDED:**
+3. **Fix Overfitting Issues** 🔄
+   1. **Increase regularization**: Default C=0.1 instead of C=1.0
+   2. **Reduce ROCKET kernels**: Use 2000-5000 instead of 10000 for small dataset
+   3. **Add early stopping**: Monitor validation performance
+   4. **Cross-validation improvements**: Use stratified group k-fold with k=3 (larger folds)
+4. **Improve Data Strategy** 🔄
+   1. **Focus on all leads only**: Single lead shows no signal
+   2. **Patient-level bootstrapping**: Duplicate minority patients to increase effective sample size
+   3. **Feature selection**: Add L1 regularization option
+
+### ⏳ **REMAINING STEPS:**
+5. **Implement Hyper-Parameter Search** (only when `--tune` flag passed):
    * Use `RandomizedSearchCV` on the pipeline; scoring = `average_precision`.
-4. **Update `run_experiments.py`**
-   * Add flags: `--tune`, `--class-weight`.
-   * Reduce config grid size; focus on best window/outcome first.
-5. **Validation Checks**
+6. **Update `run_experiments.py`**
+   * ✅ Add flags: `--tune`, `--class-weight`.
+   * 🔄 Reduce config grid size; focus on best window/outcome first.
+7. **Validation Checks**
    * Write `notebooks/01_error_analysis.ipynb` to plot ROC & PR curves per fold and confusion matrices.
    * If ROC still ≈0.5, revisit label/censoring logic in `preprocess.py`.
-6. **Documentation**
+8. **Documentation**
    * Create `docs/training_guidelines.md` summarizing best practices & the results of balance analysis.
 
 ## 5. Milestones & Expected Gains
 
-| Milestone | Metric Target |
-|-----------|---------------|
-| After class weighting | ROC-AUC ≥0.60 |
-| After hyper-parameter search | ROC-AUC ≥0.65, PR-AUC ↑ |
-| After data cleaning & window tuning | ROC-AUC ≥0.70 |
+| Milestone | Metric Target | Status |
+|-----------|---------------|--------|
+| After class weighting | ROC-AUC ≥0.60 | ❌ **0.595 achieved, but severe overfitting** |
+| After regularization fixes | ROC-AUC ≥0.60 stable | 🔄 **Next priority** |
+| After hyper-parameter search | ROC-AUC ≥0.65, PR-AUC ↑ | ⏳ Pending |
+| After data cleaning & window tuning | ROC-AUC ≥0.70 | ⏳ Pending |
 
-These are realistic on small ECG datasets (literature: 0.68–0.75).
+**⚠️ CRITICAL ISSUES FOUND:**
+- **Severe overfitting**: Train AUC=1.0, Val AUC=0.47
+- **Single lead failure**: Lead1 shows random performance (AUC≈0.50)
+- **Small fold instability**: High variance across CV folds
 
 ## 6. Future Ideas (if still plateauing)
 
