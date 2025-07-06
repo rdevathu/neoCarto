@@ -66,9 +66,15 @@ def run_single_config(config, base_dir="hp_search_results"):
         for line in lines:
             if "Results saved to:" in line:
                 results_path = line.split("Results saved to:")[1].strip()
-                results_file = Path(results_path) / "results.json"
+                results_dir = Path(results_path)
 
-                if results_file.exists():
+                # Find the results JSON file (it has the full experiment name)
+                results_files = list(results_dir.glob("*_results.json"))
+
+                if results_files:
+                    results_file = results_files[
+                        0
+                    ]  # Take the first (should be only one)
                     with open(results_file, "r") as f:
                         results = json.load(f)
 
